@@ -1,46 +1,28 @@
-#!/usr/bin/env bash
+k#!/usr/bin/env bash
 set -euo pipefail
-
-#
-# Proxmox cloud-image VM bootstrap
-# - download image naar file-based staging storage
-# - maak minimale VM-config
-# - importeer disk naar Ceph
-# - voeg EFI + Cloud-Init toe
-# - configureer user / netwerk / SSH
-#
-
-### ===== Variabelen =====
 
 VM_ID="${VM_ID:-9000}"
 VM_NAME="${VM_NAME:-ubuntu-2404-cloudinit}"
-
-NODE_NAME="${NODE_NAME:-pve1}"
+NODE_NAME="${NODE_NAME:-$(hostname)}"
 BRIDGE="${BRIDGE:-vmbr0}"
 
-# Staging pad moet file-based storage zijn, niet Ceph
-STAGING_DIR="${STAGING_DIR:-/var/lib/vz/template/iso}"
+STAGING_STORAGE="${STAGING_STORAGE:-local}"
+TARGET_STORAGE="${TARGET_STORAGE:-ceph-storage}"
 
 IMAGE_URL="${IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 IMAGE_FILE="${IMAGE_FILE:-noble-server-cloudimg-amd64.img}"
-IMAGE_PATH="${IMAGE_PATH:-$STAGING_DIR/$IMAGE_FILE}"
-
-CEPH_STORAGE="${CEPH_STORAGE:-ceph-storage}"
 
 CI_USER="${CI_USER:-ubuntu}"
 CI_PASSWORD="${CI_PASSWORD:-}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519.pub}"
 
-IP_MODE="${IP_MODE:-dhcp}"               # dhcp of static
+IP_MODE="${IP_MODE:-dhcp}"
 IP_ADDRESS="${IP_ADDRESS:-10.10.0.150/24}"
 GATEWAY="${GATEWAY:-10.10.0.1}"
 
 DISK_SIZE="${DISK_SIZE:-40G}"
-
-USE_UEFI="${USE_UEFI:-true}"             # true of false
-ENABLE_AGENT="${ENABLE_AGENT:-true}"     # true of false
-
-### ===== Helpers =====
+USE_UEFI="${USE_UEFI:-true}"
+ENABLE_AGENT="${ENABLE_AGENT:-true}"
 
 log() {
   echo
@@ -52,148 +34,134 @@ fail() {
   exit 1
 }
 
-command -v qm >/dev/null 2>&1 || fail "qm command niet gevonden. Run dit script op een Proxmox node."
-command -v pvesm >/dev/null 2>&1 || fail "pvesm command niet gevonden."
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
 
-### ===== Validaties =====
+get_storage_path() {
+  local storage_name="$1"
+  pvesm path "$storage_name" 2>/dev/null || true
+}
 
-log "Valideer storage"
-pvesm status | grep -q "^${CEPH_STORAGE}[[:space:]]" || fail "Ceph storage '${CEPH_STORAGE}' niet gevonden."
+require_cmd qm
+require_cmd pvesm
+require_cmd wget
+require_cmd awk
+require_cmd grep
 
-log "Valideer staging directory"
-mkdir -p "$STAGING_DIR"
+pvesm status | grep -q "^${STAGING_STORAGE}[[:space:]]" || fail "staging storage '${STAGING_STORAGE}' not found"
+pvesm status | grep -q "^${TARGET_STORAGE}[[:space:]]" || fail "target storage '${TARGET_STORAGE}' not found"
 
-if [[ "$IP_MODE" != "dhcp" && "$IP_MODE" != "static" ]]; then
-  fail "IP_MODE moet 'dhcp' of 'static' zijn."
-fi
+STAGING_PATH="$(get_storage_path "$STAGING_STORAGE")"
+[ -n "$STAGING_PATH" ] || fail "could not resolve a filesystem path for staging storage '${STAGING_STORAGE}'. Use a file-based storage like local or NFS."
 
-if [[ -n "$CI_PASSWORD" ]]; then
-  log "Let op: CI_PASSWORD is ingesteld. Gebruik dit alleen als je dat bewust wilt."
-fi
+IMAGE_PATH="${STAGING_PATH%/}/${IMAGE_FILE}"
 
-### ===== Stap 1: image downloaden =====
+log "Node"
+echo "$NODE_NAME"
 
-log "Download cloud image indien nodig"
-if [[ ! -f "$IMAGE_PATH" ]]; then
-  cd "$STAGING_DIR"
-  wget -O "$IMAGE_FILE" "$IMAGE_URL"
+log "Staging path"
+echo "$STAGING_PATH"
+
+log "Download cloud image if missing"
+if [ ! -f "$IMAGE_PATH" ]; then
+  wget -O "$IMAGE_PATH" "$IMAGE_URL"
 else
-  echo "Image bestaat al: $IMAGE_PATH"
+  echo "Image already exists: $IMAGE_PATH"
 fi
 
 ls -lh "$IMAGE_PATH"
 
-### ===== Stap 2: minimale VM-config =====
-
-log "Maak minimale VM-config indien nodig"
+log "Create minimal VM config if needed"
 if qm status "$VM_ID" >/dev/null 2>&1; then
-  echo "VM $VM_ID bestaat al, create wordt overgeslagen."
+  echo "VM $VM_ID already exists, skipping create"
 else
   qm create "$VM_ID" \
     --name "$VM_NAME" \
     --net0 "virtio,bridge=${BRIDGE}"
 fi
 
-### ===== Stap 3: BIOS/EFI instellen =====
-
-if [[ "$USE_UEFI" == "true" ]]; then
-  log "Stel UEFI in"
+if [ "$USE_UEFI" = "true" ]; then
+  log "Configure UEFI"
   qm set "$VM_ID" --bios ovmf
   if ! qm config "$VM_ID" | grep -q '^efidisk0:'; then
-    qm set "$VM_ID" --efidisk0 "${CEPH_STORAGE}:0,pre-enrolled-keys=0"
+    qm set "$VM_ID" --efidisk0 "${TARGET_STORAGE}:0,pre-enrolled-keys=0"
   else
-    echo "EFI disk bestaat al, overslaan."
+    echo "EFI disk already present"
   fi
 else
-  log "Gebruik SeaBIOS"
+  log "Configure SeaBIOS"
   qm set "$VM_ID" --bios seabios
 fi
 
-### ===== Stap 4: image importeren naar Ceph =====
-
-log "Controleer of OS disk al aanwezig is"
+log "Import disk if no system disk is attached yet"
 if qm config "$VM_ID" | grep -Eq '^(scsi0|virtio0|sata0):'; then
-  echo "Er is al een systeemdisk gekoppeld, import wordt overgeslagen."
+  echo "System disk already attached, skipping import"
 else
-  qm importdisk "$VM_ID" "$IMAGE_PATH" "$CEPH_STORAGE"
+  qm importdisk "$VM_ID" "$IMAGE_PATH" "$TARGET_STORAGE"
 fi
 
-### ===== Stap 5: imported disk koppelen =====
-
-log "Koppel imported disk indien nodig"
+log "Attach imported disk if needed"
 if ! qm config "$VM_ID" | grep -q '^scsi0:'; then
   IMPORTED_DISK_LINE="$(qm config "$VM_ID" | grep '^unused[0-9]\+:')"
-  [[ -n "$IMPORTED_DISK_LINE" ]] || fail "Geen imported disk gevonden als unusedX."
+  [ -n "$IMPORTED_DISK_LINE" ] || fail "no imported disk found as unusedX"
   IMPORTED_DISK="$(echo "$IMPORTED_DISK_LINE" | awk '{print $2}')"
 
   qm set "$VM_ID" \
     --scsihw virtio-scsi-pci \
     --scsi0 "$IMPORTED_DISK"
 else
-  echo "scsi0 bestaat al, overslaan."
+  echo "scsi0 already present"
 fi
 
-### ===== Stap 6: Cloud-Init disk =====
-
-log "Voeg Cloud-Init disk toe indien nodig"
+log "Add Cloud-Init disk if needed"
 if ! qm config "$VM_ID" | grep -q '^ide2:.*cloudinit'; then
-  qm set "$VM_ID" --ide2 "${CEPH_STORAGE}:cloudinit"
+  qm set "$VM_ID" --ide2 "${TARGET_STORAGE}:cloudinit"
 else
-  echo "Cloud-Init disk bestaat al, overslaan."
+  echo "Cloud-Init disk already present"
 fi
 
-### ===== Stap 7: boot en console =====
-
-log "Stel boot en console in"
+log "Configure boot and console"
 qm set "$VM_ID" \
   --boot order=scsi0 \
   --serial0 socket \
   --vga serial0
 
-if [[ "$ENABLE_AGENT" == "true" ]]; then
+if [ "$ENABLE_AGENT" = "true" ]; then
   qm set "$VM_ID" --agent enabled=1
 fi
 
-### ===== Stap 8: Cloud-Init config =====
-
-log "Stel Cloud-Init user in"
+log "Configure Cloud-Init user"
 qm set "$VM_ID" --ciuser "$CI_USER"
 
-if [[ "$IP_MODE" == "dhcp" ]]; then
-  log "Gebruik DHCP"
+if [ "$IP_MODE" = "dhcp" ]; then
+  log "Configure DHCP"
   qm set "$VM_ID" --ipconfig0 ip=dhcp
-else
-  log "Gebruik statisch IP"
+elif [ "$IP_MODE" = "static" ]; then
+  log "Configure static IP"
   qm set "$VM_ID" --ipconfig0 "ip=${IP_ADDRESS},gw=${GATEWAY}"
+else
+  fail "IP_MODE must be dhcp or static"
 fi
 
-if [[ -f "$SSH_KEY_FILE" ]]; then
-  log "Voeg SSH public key toe"
+if [ -f "$SSH_KEY_FILE" ]; then
+  log "Add SSH public key"
   qm set "$VM_ID" --sshkeys "$SSH_KEY_FILE"
 else
-  echo "SSH key file niet gevonden: $SSH_KEY_FILE"
-  echo "Overslaan. Zet SSH_KEY_FILE goed als je key-based login wilt."
+  echo "SSH key file not found, skipping: $SSH_KEY_FILE"
 fi
 
-if [[ -n "$CI_PASSWORD" ]]; then
-  log "Stel Cloud-Init wachtwoord in"
+if [ -n "$CI_PASSWORD" ]; then
+  log "Set Cloud-Init password"
   qm set "$VM_ID" --cipassword "$CI_PASSWORD"
 fi
 
-### ===== Stap 9: disk vergroten =====
-
-log "Vergroot disk naar ${DISK_SIZE}"
+log "Resize disk"
 qm resize "$VM_ID" scsi0 "$DISK_SIZE" || true
 
-### ===== Klaar =====
-
-log "Eindconfiguratie"
+log "Final VM config"
 qm config "$VM_ID"
 
 echo
-echo "Klaar."
-echo "Start de VM met:"
+echo "Done. Start the VM with:"
 echo "  qm start $VM_ID"
-echo
-echo "Cloud-Init user dump:"
-echo "  qm cloudinit dump $VM_ID user"
