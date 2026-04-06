@@ -66,9 +66,6 @@ pvesm status | grep -q "^${TARGET_STORAGE}[[:space:]]" || fail "target storage '
 IMAGE_STORAGE_PATH="$(resolve_storage_mount_path "$IMAGE_STORAGE")"
 [ -n "$IMAGE_STORAGE_PATH" ] || fail "could not resolve filesystem path for image storage '${IMAGE_STORAGE}'"
 
-# Example:
-# IMAGE_VOLID = cloudimages:import/debian-12-genericcloud-amd64.qcow2
-# REL_PATH    = import/debian-12-genericcloud-amd64.qcow2
 REL_PATH="${IMAGE_VOLID#*:}"
 IMAGE_PATH="${IMAGE_STORAGE_PATH%/}/${REL_PATH}"
 

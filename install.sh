@@ -22,6 +22,13 @@ pick_from_list() {
     exit 1
   fi
 
+  if [ ${#options[@]} -eq 1 ]; then
+    local ignored
+    read -r -p "$prompt [${options[0]}]: " ignored
+    printf '%s\n' "${options[0]}"
+    return 0
+  fi
+
   echo >&2
   echo "$prompt" >&2
 
@@ -31,19 +38,9 @@ pick_from_list() {
     i=$((i + 1))
   done
 
-  if [ ${#options[@]} -eq 1 ]; then
-    read -r -p "Press ENTER to use the only option [${options[0]}]..." _ >&2 || true
-    printf '%s\n' "${options[0]}"
-    return 0
-  fi
-
   local choice
   while true; do
     read -r -p "Choose [1-${#options[@]}]: " choice >&2
-    if [[ -z "$choice" ]]; then
-      echo "Please choose a number" >&2
-      continue
-    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#options[@]} ]; then
       printf '%s\n' "${options[$((choice - 1))]}"
       return 0
@@ -57,19 +54,21 @@ prompt_default() {
   local default_value="$2"
   local result
   read -r -p "$label [$default_value]: " result
-  echo "${result:-$default_value}"
+  printf '%s\n' "${result:-$default_value}"
 }
 
 prompt_yes_no() {
   local label="$1"
-  local default_value="$2"   # y of n
+  local default_value="$2"
   local answer
+
   while true; do
-    read -r -p "$label [$default_value]: " answer
+    read -r -p "$label [y/n] (default: $default_value): " answer
     answer="${answer:-$default_value}"
+
     case "${answer,,}" in
-      y|yes) echo "true"; return 0 ;;
-      n|no) echo "false"; return 0 ;;
+      y|yes) printf '%s\n' "true"; return 0 ;;
+      n|no) printf '%s\n' "false"; return 0 ;;
       *) echo "Please answer y or n" ;;
     esac
   done
@@ -78,28 +77,31 @@ prompt_yes_no() {
 prompt_ssh_key() {
   echo
   echo "=== SSH KEY ==="
-  echo "1) Paste public key"
-  echo "2) Use existing file path"
+  echo "Choose how you want to provide the SSH public key:"
+  echo "  [1] Paste SSH public key"
+  echo "  [2] Use SSH public key file path"
 
   local choice
   while true; do
-    read -r -p "SSH key input method [1-2]: " choice
+    read -r -p "SSH key method [1-2] (default: 1): " choice
+    choice="${choice:-1}"
+
     case "$choice" in
       1)
         echo
-        echo "Paste your public key, then press ENTER:"
+        echo "Paste the SSH public key and press ENTER:"
         local key
         read -r key
         if [[ ! "$key" =~ ^ssh- ]]; then
           echo "ERROR: invalid SSH public key format" >&2
           exit 1
         fi
-        echo "$key"
+        printf '%s\n' "$key"
         return 0
         ;;
       2)
         local path
-        read -r -p "SSH public key path [$HOME/.ssh/id_ed25519.pub]: " path
+        read -r -p "SSH public key file path [$HOME/.ssh/id_ed25519.pub]: " path
         path="${path:-$HOME/.ssh/id_ed25519.pub}"
         if [ ! -f "$path" ]; then
           echo "ERROR: file not found: $path" >&2
@@ -109,7 +111,7 @@ prompt_ssh_key() {
         return 0
         ;;
       *)
-        echo "Invalid choice"
+        echo "Invalid choice. Use 1 for paste or 2 for file path."
         ;;
     esac
   done
