@@ -16,22 +16,23 @@ pick_from_list() {
   shift
   local options=("$@")
 
-  echo
-  echo "$prompt"
+  echo >&2
+  echo "$prompt" >&2
+
   local i=1
   for opt in "${options[@]}"; do
-    echo "  [$i] $opt"
+    echo "  [$i] $opt" >&2
     i=$((i + 1))
   done
 
   local choice
   while true; do
-    read -r -p "Choose [1-${#options[@]}]: " choice
+    read -r -p "Choose [1-${#options[@]}]: " choice >&2
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#options[@]} ]; then
-      echo "${options[$((choice - 1))]}"
-      return
+      printf '%s\n' "${options[$((choice - 1))]}"
+      return 0
     fi
-    echo "Invalid choice"
+    echo "Invalid choice" >&2
   done
 }
 
@@ -57,19 +58,30 @@ require_cmd pvesm
 require_cmd ip
 
 HOSTNAME_NOW="$(hostname)"
+
 mapfile -t STORAGES < <(get_storage_names)
 mapfile -t BRIDGES < <(get_bridge_names)
+
+if [ ${#STORAGES[@]} -eq 0 ]; then
+  echo "ERROR: no storages found via pvesm status" >&2
+  exit 1
+fi
+
+if [ ${#BRIDGES[@]} -eq 0 ]; then
+  echo "ERROR: no vmbr bridges found" >&2
+  exit 1
+fi
 
 echo
 echo "IONOX Proxmox Cloud VM Installer"
 echo "Running on node: $HOSTNAME_NOW"
 
-STAGING_STORAGE="$(pick_from_list "Select staging storage" "${STORAGES[@]}")"
-TARGET_STORAGE="$(pick_from_list "Select target storage" "${STORAGES[@]}")"
-BRIDGE="$(pick_from_list "Select bridge" "${BRIDGES[@]}")"
+STAGING_STORAGE="$(pick_from_list "Select staging storage (file-based preferred)" "${STORAGES[@]}")"
+TARGET_STORAGE="$(pick_from_list "Select target VM disk storage" "${STORAGES[@]}")"
+BRIDGE="$(pick_from_list "Select network bridge" "${BRIDGES[@]}")"
 
 VM_ID="$(prompt_default "VM ID" "9000")"
-VM_NAME="$(prompt_default "VM name" "ubuntu-vm")"
+VM_NAME="$(prompt_default "VM name" "ubuntu-cloud-vm")"
 
 echo
 echo "Starting bootstrap..."
@@ -79,6 +91,7 @@ chmod +x "$TMP_SCRIPT"
 
 VM_ID="$VM_ID" \
 VM_NAME="$VM_NAME" \
+NODE_NAME="$HOSTNAME_NOW" \
 STAGING_STORAGE="$STAGING_STORAGE" \
 TARGET_STORAGE="$TARGET_STORAGE" \
 BRIDGE="$BRIDGE" \
