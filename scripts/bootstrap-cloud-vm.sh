@@ -1,4 +1,4 @@
-k#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 VM_ID="${VM_ID:-9000}"
@@ -14,7 +14,7 @@ IMAGE_FILE="${IMAGE_FILE:-noble-server-cloudimg-amd64.img}"
 
 CI_USER="${CI_USER:-ubuntu}"
 CI_PASSWORD="${CI_PASSWORD:-}"
-SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519.pub}"
+SSH_KEY="${SSH_KEY:-}"
 
 IP_MODE="${IP_MODE:-dhcp}"
 IP_ADDRESS="${IP_ADDRESS:-10.10.0.150/24}"
@@ -144,11 +144,14 @@ else
   fail "IP_MODE must be dhcp or static"
 fi
 
-if [ -f "$SSH_KEY_FILE" ]; then
+if [ -n "$SSH_KEY" ]; then
   log "Add SSH public key"
-  qm set "$VM_ID" --sshkeys "$SSH_KEY_FILE"
+  SSH_KEY_TMP="$(mktemp)"
+  printf '%s\n' "$SSH_KEY" > "$SSH_KEY_TMP"
+  qm set "$VM_ID" --sshkeys "$SSH_KEY_TMP"
+  rm -f "$SSH_KEY_TMP"
 else
-  echo "SSH key file not found, skipping: $SSH_KEY_FILE"
+  echo "No SSH public key provided, skipping"
 fi
 
 if [ -n "$CI_PASSWORD" ]; then
