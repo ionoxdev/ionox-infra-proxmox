@@ -2,15 +2,14 @@
 set -euo pipefail
 
 VM_ID="${VM_ID:-9000}"
-VM_NAME="${VM_NAME:-ubuntu-2404-cloudinit}"
+VM_NAME="${VM_NAME:-ubuntu-cloud-vm}"
 NODE_NAME="${NODE_NAME:-$(hostname)}"
 BRIDGE="${BRIDGE:-vmbr0}"
 
-STAGING_STORAGE="${STAGING_STORAGE:-local}"
-TARGET_STORAGE="${TARGET_STORAGE:-ceph-storage}"
+IMAGE_STORAGE="${IMAGE_STORAGE:-cloudimages}"
+IMAGE_FILE="${IMAGE_FILE:-}"
 
-IMAGE_URL="${IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
-IMAGE_FILE="${IMAGE_FILE:-noble-server-cloudimg-amd64.img}"
+TARGET_STORAGE="${TARGET_STORAGE:-ceph-storage}"
 
 CI_USER="${CI_USER:-ubuntu}"
 CI_PASSWORD="${CI_PASSWORD:-}"
@@ -23,6 +22,7 @@ GATEWAY="${GATEWAY:-10.10.0.1}"
 DISK_SIZE="${DISK_SIZE:-40G}"
 USE_UEFI="${USE_UEFI:-true}"
 ENABLE_AGENT="${ENABLE_AGENT:-true}"
+MAKE_TEMPLATE="${MAKE_TEMPLATE:-false}"
 
 log() {
   echo
@@ -38,8 +38,11 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
 
-resolve_staging_path() {
+resolve_image_storage_path() {
   case "$1" in
+    cloudimages)
+      echo "/mnt/pve/cloudimages"
+      ;;
     local)
       echo "/var/lib/vz/template/iso"
       ;;
@@ -49,49 +52,37 @@ resolve_staging_path() {
     truenas-vm)
       echo "/mnt/pve/truenas-vm"
       ;;
-    truenas-backups)
-      echo "/mnt/pve/truenas-backups"
-      ;;
-    truenas-lxc)
-      echo "/mnt/pve/truenas-lxc"
-      ;;
     *)
-      local path
-      path="$(pvesm path "$1" 2>/dev/null || true)"
-      echo "$path"
+      pvesm path "$1" 2>/dev/null || true
       ;;
   esac
 }
 
 require_cmd qm
 require_cmd pvesm
-require_cmd wget
 require_cmd awk
 require_cmd grep
+require_cmd mktemp
 
-pvesm status | grep -q "^${STAGING_STORAGE}[[:space:]]" || fail "staging storage '${STAGING_STORAGE}' not found"
+[ -n "$IMAGE_FILE" ] || fail "IMAGE_FILE is required"
+
+pvesm status | grep -q "^${IMAGE_STORAGE}[[:space:]]" || fail "image storage '${IMAGE_STORAGE}' not found"
 pvesm status | grep -q "^${TARGET_STORAGE}[[:space:]]" || fail "target storage '${TARGET_STORAGE}' not found"
 
-STAGING_PATH="$(resolve_staging_path "$STAGING_STORAGE")"
-[ -n "$STAGING_PATH" ] || fail "could not resolve a filesystem path for staging storage '${STAGING_STORAGE}'"
-mkdir -p "$STAGING_PATH"
+IMAGE_STORAGE_PATH="$(resolve_image_storage_path "$IMAGE_STORAGE")"
+[ -n "$IMAGE_STORAGE_PATH" ] || fail "could not resolve filesystem path for image storage '${IMAGE_STORAGE}'"
 
-IMAGE_PATH="${STAGING_PATH%/}/${IMAGE_FILE}"
+IMAGE_PATH="${IMAGE_STORAGE_PATH%/}/${IMAGE_FILE}"
+[ -f "$IMAGE_PATH" ] || fail "image file not found: $IMAGE_PATH"
 
 log "Node"
 echo "$NODE_NAME"
 
-log "Staging path"
-echo "$STAGING_PATH"
+log "Image storage path"
+echo "$IMAGE_STORAGE_PATH"
 
-log "Download cloud image if missing"
-if [ ! -f "$IMAGE_PATH" ]; then
-  wget -O "$IMAGE_PATH" "$IMAGE_URL"
-else
-  echo "Image already exists: $IMAGE_PATH"
-fi
-
-ls -lh "$IMAGE_PATH"
+log "Image file"
+echo "$IMAGE_PATH"
 
 log "Create minimal VM config if needed"
 if qm status "$VM_ID" >/dev/null 2>&1; then
@@ -183,9 +174,18 @@ fi
 log "Resize disk"
 qm resize "$VM_ID" scsi0 "$DISK_SIZE" || true
 
+if [ "$MAKE_TEMPLATE" = "true" ]; then
+  log "Convert VM to template"
+  qm template "$VM_ID"
+fi
+
 log "Final VM config"
 qm config "$VM_ID"
 
 echo
-echo "Done. Start the VM with:"
-echo "  qm start $VM_ID"
+if [ "$MAKE_TEMPLATE" = "true" ]; then
+  echo "Done. VM $VM_ID is now a template."
+else
+  echo "Done. Start the VM with:"
+  echo "  qm start $VM_ID"
+fi

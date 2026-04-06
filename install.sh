@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_RAW_BASE="${REPO_RAW_BASE:-https://raw.githubusercontent.com/ionoxdev/ionox-infra-proxmox/main}"
 TMP_SCRIPT="/tmp/bootstrap-cloud-vm.sh"
+IMAGE_STORAGE="${IMAGE_STORAGE:-cloudimages}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -15,6 +16,11 @@ pick_from_list() {
   local prompt="$1"
   shift
   local options=("$@")
+
+  if [ ${#options[@]} -eq 0 ]; then
+    echo "ERROR: no options available for: $prompt" >&2
+    exit 1
+  fi
 
   echo >&2
   echo "$prompt" >&2
@@ -59,14 +65,6 @@ prompt_yes_no() {
   done
 }
 
-get_storage_names() {
-  pvesm status | awk 'NR>1 {print $1}'
-}
-
-get_bridge_names() {
-  ip -o link show | awk -F': ' '{print $2}' | grep '^vmbr' || true
-}
-
 prompt_ssh_key() {
   echo
   echo "=== SSH KEY ==="
@@ -107,28 +105,53 @@ prompt_ssh_key() {
   done
 }
 
+get_bridge_names() {
+  ip -o link show | awk -F': ' '{print $2}' | grep '^vmbr' || true
+}
+
+get_target_storage_names() {
+  pvesm status | awk 'NR>1 {print $1}' | grep -v "^${IMAGE_STORAGE}$" || true
+}
+
+get_cloud_images() {
+  pvesm list "$IMAGE_STORAGE" | awk 'NR>1 {print $1}'
+}
+
 require_cmd curl
 require_cmd qm
 require_cmd pvesm
 require_cmd ip
 
 HOSTNAME_NOW="$(hostname)"
-mapfile -t STORAGES < <(get_storage_names)
-mapfile -t BRIDGES < <(get_bridge_names)
 
-if [ ${#STORAGES[@]} -eq 0 ]; then
-  echo "ERROR: no storages found via pvesm status" >&2
+if ! pvesm status | awk 'NR>1 {print $1}' | grep -qx "$IMAGE_STORAGE"; then
+  echo "ERROR: image storage '$IMAGE_STORAGE' not found" >&2
   exit 1
 fi
+
+mapfile -t BRIDGES < <(get_bridge_names)
+mapfile -t TARGET_STORAGES < <(get_target_storage_names)
+mapfile -t CLOUD_IMAGES < <(get_cloud_images)
 
 if [ ${#BRIDGES[@]} -eq 0 ]; then
   echo "ERROR: no vmbr bridges found" >&2
   exit 1
 fi
 
+if [ ${#TARGET_STORAGES[@]} -eq 0 ]; then
+  echo "ERROR: no target storages found" >&2
+  exit 1
+fi
+
+if [ ${#CLOUD_IMAGES[@]} -eq 0 ]; then
+  echo "ERROR: no cloud images found in storage '$IMAGE_STORAGE'" >&2
+  exit 1
+fi
+
 echo
 echo "IONOX Proxmox Cloud VM Installer"
 echo "Running on node: $HOSTNAME_NOW"
+echo "Image storage: $IMAGE_STORAGE"
 
 echo
 echo "=== VM CONFIGURATION ==="
@@ -137,8 +160,7 @@ VM_NAME="$(prompt_default "VM name" "ubuntu-cloud-vm")"
 
 echo
 echo "=== IMAGE ==="
-IMAGE_URL="$(prompt_default "Cloud image URL" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img")"
-IMAGE_FILE="$(prompt_default "Image filename" "noble-server-cloudimg-amd64.img")"
+IMAGE_FILE="$(pick_from_list "Select cloud image from storage '$IMAGE_STORAGE'" "${CLOUD_IMAGES[@]}")"
 
 echo
 echo "=== NETWORK ==="
@@ -156,8 +178,7 @@ fi
 
 echo
 echo "=== STORAGE ==="
-STAGING_STORAGE="$(pick_from_list "Select staging storage (temporary image download; file-based preferred)" "${STORAGES[@]}")"
-TARGET_STORAGE="$(pick_from_list "Select target VM storage" "${STORAGES[@]}")"
+TARGET_STORAGE="$(pick_from_list "Select target VM storage" "${TARGET_STORAGES[@]}")"
 
 echo
 echo "=== CLOUD INIT ==="
@@ -169,12 +190,13 @@ echo "=== OPTIONS ==="
 DISK_SIZE="$(prompt_default "Disk size" "40G")"
 USE_UEFI="$(prompt_yes_no "Use UEFI" "y")"
 ENABLE_AGENT="$(prompt_yes_no "Enable guest agent" "y")"
+MAKE_TEMPLATE="$(prompt_yes_no "Make VM a template after creation" "n")"
 
 echo
 echo "=== SUMMARY ==="
 echo "VM ID:           $VM_ID"
 echo "VM Name:         $VM_NAME"
-echo "Image URL:       $IMAGE_URL"
+echo "Image Storage:   $IMAGE_STORAGE"
 echo "Image File:      $IMAGE_FILE"
 echo "Bridge:          $BRIDGE"
 echo "IP Mode:         $IP_MODE"
@@ -182,12 +204,12 @@ if [[ "$IP_MODE" == "static" ]]; then
   echo "IP Address:      $IP_ADDRESS"
   echo "Gateway:         $GATEWAY"
 fi
-echo "Staging Storage: $STAGING_STORAGE"
 echo "Target Storage:  $TARGET_STORAGE"
 echo "Cloud-Init User: $CI_USER"
 echo "Disk Size:       $DISK_SIZE"
 echo "Use UEFI:        $USE_UEFI"
 echo "Guest Agent:     $ENABLE_AGENT"
+echo "Make Template:   $MAKE_TEMPLATE"
 echo "SSH Key:         provided"
 
 echo
@@ -206,11 +228,10 @@ echo "Starting bootstrap..."
 VM_ID="$VM_ID" \
 VM_NAME="$VM_NAME" \
 NODE_NAME="$HOSTNAME_NOW" \
-STAGING_STORAGE="$STAGING_STORAGE" \
+IMAGE_STORAGE="$IMAGE_STORAGE" \
+IMAGE_FILE="$IMAGE_FILE" \
 TARGET_STORAGE="$TARGET_STORAGE" \
 BRIDGE="$BRIDGE" \
-IMAGE_URL="$IMAGE_URL" \
-IMAGE_FILE="$IMAGE_FILE" \
 CI_USER="$CI_USER" \
 SSH_KEY="$SSH_KEY" \
 DISK_SIZE="$DISK_SIZE" \
@@ -219,4 +240,5 @@ ENABLE_AGENT="$ENABLE_AGENT" \
 IP_MODE="$IP_MODE" \
 IP_ADDRESS="$IP_ADDRESS" \
 GATEWAY="$GATEWAY" \
+MAKE_TEMPLATE="$MAKE_TEMPLATE" \
 "$TMP_SCRIPT"
