@@ -12,8 +12,8 @@ IMAGE_VOLID="${IMAGE_VOLID:-}"
 TARGET_STORAGE="${TARGET_STORAGE:-ceph-storage}"
 
 CI_USER="${CI_USER:-ubuntu}"
-CI_PASSWORD="${CI_PASSWORD:-}"
-SSH_KEY="${SSH_KEY:-}"
+SSH_KEY_B64="${SSH_KEY_B64:-}"
+CI_PASSWORD_B64="${CI_PASSWORD_B64:-}"
 
 IP_MODE="${IP_MODE:-dhcp}"
 IP_ADDRESS="${IP_ADDRESS:-10.10.0.150/24}"
@@ -57,6 +57,7 @@ require_cmd pvesm
 require_cmd awk
 require_cmd grep
 require_cmd mktemp
+require_cmd base64
 
 [ -n "$IMAGE_VOLID" ] || fail "IMAGE_VOLID is required"
 
@@ -70,6 +71,17 @@ REL_PATH="${IMAGE_VOLID#*:}"
 IMAGE_PATH="${IMAGE_STORAGE_PATH%/}/${REL_PATH}"
 
 [ -f "$IMAGE_PATH" ] || fail "image file not found: $IMAGE_PATH"
+
+SSH_KEY=""
+CI_PASSWORD=""
+
+if [ -n "$SSH_KEY_B64" ]; then
+  SSH_KEY="$(printf '%s' "$SSH_KEY_B64" | base64 -d | tr -d '\r')"
+fi
+
+if [ -n "$CI_PASSWORD_B64" ]; then
+  CI_PASSWORD="$(printf '%s' "$CI_PASSWORD_B64" | base64 -d | tr -d '\r')"
+fi
 
 log "Node"
 echo "$NODE_NAME"
@@ -144,7 +156,6 @@ fi
 
 log "Configure Cloud-Init user"
 qm set "$VM_ID" --ciuser "$CI_USER"
-echo "Cloud-Init user set to: $CI_USER"
 
 if [ "$IP_MODE" = "dhcp" ]; then
   log "Configure DHCP"
@@ -162,8 +173,6 @@ if [ -n "$SSH_KEY" ]; then
   printf '%s\n' "$SSH_KEY" > "$SSH_KEY_TMP"
   qm set "$VM_ID" --sshkeys "$SSH_KEY_TMP"
   rm -f "$SSH_KEY_TMP"
-else
-  echo "No SSH public key provided, skipping"
 fi
 
 if [ -n "$CI_PASSWORD" ]; then

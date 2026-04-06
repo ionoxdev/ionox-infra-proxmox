@@ -59,13 +59,12 @@ prompt_default() {
 
 prompt_yes_no() {
   local label="$1"
-  local default_value="$2"
+  local default_value="$2"  # y or n
   local answer
 
   while true; do
-    read -r -p "$label [y/n] (default: $default_value): " answer
+    read -r -p "$label [y/n] [$default_value]: " answer
     answer="${answer:-$default_value}"
-
     case "${answer,,}" in
       y|yes) printf '%s\n' "true"; return 0 ;;
       n|no) printf '%s\n' "false"; return 0 ;;
@@ -74,29 +73,54 @@ prompt_yes_no() {
   done
 }
 
-prompt_ssh_key() {
+prompt_secret() {
+  local label="$1"
+  local value1 value2
+
+  while true; do
+    read -r -s -p "$label: " value1
+    echo
+    if [ -z "$value1" ]; then
+      echo "Value cannot be empty"
+      continue
+    fi
+    read -r -s -p "Confirm $label: " value2
+    echo
+    if [ "$value1" = "$value2" ]; then
+      printf '%s\n' "$value1"
+      return 0
+    fi
+    echo "Values do not match"
+  done
+}
+
+prompt_auth_method() {
   echo
-  echo "=== SSH KEY ==="
-  echo "Choose how you want to provide the SSH public key:"
+  echo "=== AUTHENTICATION ==="
   echo "  [1] Paste SSH public key"
   echo "  [2] Use SSH public key file path"
+  echo "  [3] Password only"
+  echo "  [4] SSH public key + password"
+  echo "  [5] No authentication config"
 
-  local choice
+  local choice ssh_key="" ci_password=""
+
   while true; do
-    read -r -p "SSH key method [1-2] (default: 1): " choice
+    read -r -p "Authentication method [1-5] [1]: " choice
     choice="${choice:-1}"
 
     case "$choice" in
       1)
         echo
-        echo "Paste the SSH public key and press ENTER:"
-        local key
-        read -r key
-        if [[ ! "$key" =~ ^ssh- ]]; then
-          echo "ERROR: invalid SSH public key format" >&2
-          exit 1
+        echo "Paste SSH public key and press ENTER:"
+        read -r ssh_key
+        ssh_key="${ssh_key//$'\r'/}"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key"
+          continue
         fi
-        printf '%s\n' "$key"
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=\n'
         return 0
         ;;
       2)
@@ -104,14 +128,45 @@ prompt_ssh_key() {
         read -r -p "SSH public key file path [$HOME/.ssh/id_ed25519.pub]: " path
         path="${path:-$HOME/.ssh/id_ed25519.pub}"
         if [ ! -f "$path" ]; then
-          echo "ERROR: file not found: $path" >&2
-          exit 1
+          echo "File not found: $path"
+          continue
         fi
-        cat "$path"
+        ssh_key="$(tr -d '\r' < "$path")"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key file contents"
+          continue
+        fi
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=\n'
+        return 0
+        ;;
+      3)
+        ci_password="$(prompt_secret "Password")"
+        printf 'SSH_KEY_B64=\n'
+        printf 'CI_PASSWORD_B64=%s\n' "$(printf '%s' "$ci_password" | base64 | tr -d '\n')"
+        return 0
+        ;;
+      4)
+        echo
+        echo "Paste SSH public key and press ENTER:"
+        read -r ssh_key
+        ssh_key="${ssh_key//$'\r'/}"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key"
+          continue
+        fi
+        ci_password="$(prompt_secret "Password")"
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=%s\n' "$(printf '%s' "$ci_password" | base64 | tr -d '\n')"
+        return 0
+        ;;
+      5)
+        printf 'SSH_KEY_B64=\n'
+        printf 'CI_PASSWORD_B64=\n'
         return 0
         ;;
       *)
-        echo "Invalid choice. Use 1 for paste or 2 for file path."
+        echo "Invalid choice"
         ;;
     esac
   done
@@ -133,6 +188,7 @@ require_cmd curl
 require_cmd qm
 require_cmd pvesm
 require_cmd ip
+require_cmd base64
 
 HOSTNAME_NOW="$(hostname)"
 
@@ -195,7 +251,7 @@ TARGET_STORAGE="$(pick_from_list "Select target VM storage" "${TARGET_STORAGES[@
 echo
 echo "=== CLOUD INIT ==="
 CI_USER="$(prompt_default "Username" "ubuntu")"
-SSH_KEY="$(prompt_ssh_key)"
+eval "$(prompt_auth_method)"
 
 echo
 echo "=== OPTIONS ==="
@@ -222,7 +278,8 @@ echo "Disk Size:       $DISK_SIZE"
 echo "Use UEFI:        $USE_UEFI"
 echo "Guest Agent:     $ENABLE_AGENT"
 echo "Make Template:   $MAKE_TEMPLATE"
-echo "SSH Key:         provided"
+[ -n "${SSH_KEY_B64:-}" ] && echo "SSH Key:         provided" || echo "SSH Key:         none"
+[ -n "${CI_PASSWORD_B64:-}" ] && echo "Password:        provided" || echo "Password:        none"
 
 echo
 read -r -p "Continue? [y/N]: " CONFIRM
@@ -245,7 +302,8 @@ IMAGE_VOLID="$IMAGE_VOLID" \
 TARGET_STORAGE="$TARGET_STORAGE" \
 BRIDGE="$BRIDGE" \
 CI_USER="$CI_USER" \
-SSH_KEY="$SSH_KEY" \
+SSH_KEY_B64="${SSH_KEY_B64:-}" \
+CI_PASSWORD_B64="${CI_PASSWORD_B64:-}" \
 DISK_SIZE="$DISK_SIZE" \
 USE_UEFI="$USE_UEFI" \
 ENABLE_AGENT="$ENABLE_AGENT" \
