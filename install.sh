@@ -17,20 +17,19 @@ prompt_default() {
   local default_value="$2"
   local result
   read -r -p "$label [$default_value]: " result
-  echo "${result:-$default_value}"
+  printf '%s\n' "${result:-$default_value}"
 }
 
 prompt_yes_no() {
   local label="$1"
-  local default_value="$2"
+  local default_value="$2" # y or n
   local answer
-
   while true; do
     read -r -p "$label [y/n] [$default_value]: " answer
     answer="${answer:-$default_value}"
     case "${answer,,}" in
-      y|yes) echo "true"; return ;;
-      n|no) echo "false"; return ;;
+      y|yes) printf '%s\n' "true"; return 0 ;;
+      n|no) printf '%s\n' "false"; return 0 ;;
       *) echo "Please answer y or n" ;;
     esac
   done
@@ -41,150 +40,269 @@ pick_from_list() {
   shift
   local options=("$@")
 
-  if [ ${#options[@]} -eq 1 ]; then
-    read -r -p "$prompt [${options[0]}]: " _
-    echo "${options[0]}"
-    return
+  if [ ${#options[@]} -eq 0 ]; then
+    echo "ERROR: no options available for: $prompt" >&2
+    exit 1
   fi
 
-  echo "$prompt"
+  if [ ${#options[@]} -eq 1 ]; then
+    local ignored
+    read -r -p "$prompt [${options[0]}]: " ignored
+    printf '%s\n' "${options[0]}"
+    return 0
+  fi
+
+  echo >&2
+  echo "$prompt" >&2
   local i=1
   for opt in "${options[@]}"; do
-    echo "  [$i] $opt"
+    echo "  [$i] $opt" >&2
     i=$((i + 1))
   done
 
+  local choice
   while true; do
-    read -r -p "Choose [1-${#options[@]}]: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]]; then
-      echo "${options[$((choice - 1))]}"
-      return
+    read -r -p "Choose [1-${#options[@]}]: " choice >&2
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#options[@]} ]; then
+      printf '%s\n' "${options[$((choice - 1))]}"
+      return 0
     fi
-    echo "Invalid choice"
+    echo "Invalid choice" >&2
   done
 }
 
 prompt_secret() {
   local label="$1"
-  local v1 v2
+  local value1 value2
   while true; do
-    read -r -s -p "$label: " v1; echo
-    read -r -s -p "Confirm $label: " v2; echo
-    [[ "$v1" == "$v2" ]] && echo "$v1" && return
-    echo "Mismatch"
+    read -r -s -p "$label: " value1 >&2
+    echo >&2
+    if [ -z "$value1" ]; then
+      echo "Value cannot be empty" >&2
+      continue
+    fi
+    read -r -s -p "Confirm $label: " value2 >&2
+    echo >&2
+    if [ "$value1" = "$value2" ]; then
+      printf '%s\n' "$value1"
+      return 0
+    fi
+    echo "Values do not match" >&2
   done
 }
 
 prompt_auth_method() {
-  echo
-  echo "=== AUTHENTICATION ==="
-  echo "Select authentication method:"
-  echo "  [1] SSH key (paste)"
-  echo "  [2] SSH key (file)"
-  echo "  [3] Password"
-  echo "  [4] SSH key + password"
-  echo "  [5] None"
+  echo >&2
+  echo "=== AUTHENTICATION ===" >&2
+  echo "Select authentication method:" >&2
+  echo "  [1] SSH public key (paste)" >&2
+  echo "  [2] SSH public key (file path)" >&2
+  echo "  [3] Password" >&2
+  echo "  [4] SSH public key + password" >&2
+  echo "  [5] None" >&2
+
+  local choice ssh_key="" ci_password="" path
 
   while true; do
-    read -r -p "Authentication method [1-5] [1]: " choice
+    read -r -p "Authentication method [1-5] [1]: " choice >&2
     choice="${choice:-1}"
 
     case "$choice" in
       1)
-        echo "Paste SSH public key:"
-        read -r key
-        echo "SSH_KEY_B64=$(printf '%s' "$key" | base64 -w0)"
-        echo "CI_PASSWORD_B64="
-        return
+        echo "Paste SSH public key:" >&2
+        read -r ssh_key >&2 || true
+        ssh_key="${ssh_key//$'\r'/}"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key" >&2
+          continue
+        fi
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=\n'
+        return 0
         ;;
       2)
-        read -r -p "Path [$HOME/.ssh/id_ed25519.pub]: " path
+        read -r -p "SSH public key file path [$HOME/.ssh/id_ed25519.pub]: " path >&2
         path="${path:-$HOME/.ssh/id_ed25519.pub}"
-        key="$(cat "$path")"
-        echo "SSH_KEY_B64=$(printf '%s' "$key" | base64 -w0)"
-        echo "CI_PASSWORD_B64="
-        return
+        if [ ! -f "$path" ]; then
+          echo "File not found: $path" >&2
+          continue
+        fi
+        ssh_key="$(tr -d '\r' < "$path")"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key file contents" >&2
+          continue
+        fi
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=\n'
+        return 0
         ;;
       3)
-        pass="$(prompt_secret "Password")"
-        echo "SSH_KEY_B64="
-        echo "CI_PASSWORD_B64=$(printf '%s' "$pass" | base64 -w0)"
-        return
+        ci_password="$(prompt_secret "Password")"
+        printf 'SSH_KEY_B64=\n'
+        printf 'CI_PASSWORD_B64=%s\n' "$(printf '%s' "$ci_password" | base64 | tr -d '\n')"
+        return 0
         ;;
       4)
-        echo "Paste SSH key:"
-        read -r key
-        pass="$(prompt_secret "Password")"
-        echo "SSH_KEY_B64=$(printf '%s' "$key" | base64 -w0)"
-        echo "CI_PASSWORD_B64=$(printf '%s' "$pass" | base64 -w0)"
-        return
+        echo "Paste SSH public key:" >&2
+        read -r ssh_key >&2 || true
+        ssh_key="${ssh_key//$'\r'/}"
+        if [[ ! "$ssh_key" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
+          echo "Invalid SSH public key" >&2
+          continue
+        fi
+        ci_password="$(prompt_secret "Password")"
+        printf 'SSH_KEY_B64=%s\n' "$(printf '%s' "$ssh_key" | base64 | tr -d '\n')"
+        printf 'CI_PASSWORD_B64=%s\n' "$(printf '%s' "$ci_password" | base64 | tr -d '\n')"
+        return 0
         ;;
       5)
-        echo "SSH_KEY_B64="
-        echo "CI_PASSWORD_B64="
-        return
+        printf 'SSH_KEY_B64=\n'
+        printf 'CI_PASSWORD_B64=\n'
+        return 0
+        ;;
+      *)
+        echo "Invalid choice" >&2
         ;;
     esac
   done
 }
 
-get_bridge_names() { ip -o link show | awk -F': ' '{print $2}' | grep '^vmbr'; }
-get_storage() { pvesm status | awk 'NR>1 {print $1}'; }
-get_images() { pvesm list "$IMAGE_STORAGE" | awk 'NR>1 {print $1}'; }
+get_bridge_names() {
+  ip -o link show | awk -F': ' '{print $2}' | grep '^vmbr' || true
+}
+
+get_target_storage_names() {
+  pvesm status | awk 'NR>1 {print $1}' | grep -v "^${IMAGE_STORAGE}$" || true
+}
+
+get_cloud_images() {
+  pvesm list "$IMAGE_STORAGE" | awk 'NR>1 {print $1}'
+}
 
 require_cmd curl
 require_cmd qm
 require_cmd pvesm
+require_cmd ip
+require_cmd base64
 
 HOSTNAME_NOW="$(hostname)"
 
-mapfile -t BRIDGES < <(get_bridge_names)
-mapfile -t STORAGES < <(get_storage)
-mapfile -t IMAGES < <(get_images)
-
-echo "=== VM CONFIGURATION ==="
-VM_ID="$(prompt_default "VM ID" 9000)"
-VM_NAME="$(prompt_default "VM name" ubuntu-cloud-vm)"
-
-echo "=== IMAGE ==="
-IMAGE_VOLID="$(pick_from_list "Select image" "${IMAGES[@]}")"
-
-echo "=== NETWORK ==="
-BRIDGE="$(pick_from_list "Select bridge" "${BRIDGES[@]}")"
-IP_MODE="$(prompt_default "Network mode (dhcp/static)" dhcp)"
-
-if [[ "$IP_MODE" == "static" ]]; then
-  IP_ADDRESS="$(prompt_default "IP" 10.10.0.100/24)"
-  GATEWAY="$(prompt_default "Gateway" 10.10.0.1)"
+if ! pvesm status | awk 'NR>1 {print $1}' | grep -qx "$IMAGE_STORAGE"; then
+  echo "ERROR: image storage '$IMAGE_STORAGE' not found" >&2
+  exit 1
 fi
 
-echo "=== STORAGE ==="
-TARGET_STORAGE="$(pick_from_list "Select storage" "${STORAGES[@]}")"
+mapfile -t BRIDGES < <(get_bridge_names)
+mapfile -t TARGET_STORAGES < <(get_target_storage_names)
+mapfile -t CLOUD_IMAGES < <(get_cloud_images)
 
+if [ ${#BRIDGES[@]} -eq 0 ]; then
+  echo "ERROR: no vmbr bridges found" >&2
+  exit 1
+fi
+
+if [ ${#TARGET_STORAGES[@]} -eq 0 ]; then
+  echo "ERROR: no target storages found" >&2
+  exit 1
+fi
+
+if [ ${#CLOUD_IMAGES[@]} -eq 0 ]; then
+  echo "ERROR: no cloud images found in storage '$IMAGE_STORAGE'" >&2
+  exit 1
+fi
+
+echo
+echo "IONOX Proxmox Cloud VM Installer"
+echo "Running on node: $HOSTNAME_NOW"
+echo "Image storage: $IMAGE_STORAGE"
+
+echo
+echo "=== VM CONFIGURATION ==="
+VM_ID="$(prompt_default "VM ID" "9000")"
+VM_NAME="$(prompt_default "VM name" "ubuntu-cloud-vm")"
+
+echo
+echo "=== IMAGE ==="
+IMAGE_VOLID="$(pick_from_list "Select cloud image from storage '$IMAGE_STORAGE'" "${CLOUD_IMAGES[@]}")"
+
+echo
+echo "=== NETWORK ==="
+BRIDGE="$(pick_from_list "Select network bridge" "${BRIDGES[@]}")"
+IP_MODE_RAW="$(prompt_default "Network mode (dhcp/static)" "dhcp")"
+IP_MODE="${IP_MODE_RAW,,}"
+
+IP_ADDRESS=""
+GATEWAY="10.10.0.1"
+if [[ "$IP_MODE" == "static" ]]; then
+  IP_ADDRESS="$(prompt_default "Static IP (CIDR)" "10.10.0.150/24")"
+  GATEWAY="$(prompt_default "Gateway" "10.10.0.1")"
+fi
+
+echo
+echo "=== STORAGE ==="
+TARGET_STORAGE="$(pick_from_list "Select target VM storage" "${TARGET_STORAGES[@]}")"
+
+echo
 echo "=== CLOUD INIT ==="
-CI_USER="$(prompt_default "Username" ubuntu)"
+CI_USER="$(prompt_default "Username" "ubuntu")"
 eval "$(prompt_auth_method)"
 
+echo
 echo "=== OPTIONS ==="
-DISK_SIZE="$(prompt_default "Disk size" 40G)"
-USE_UEFI="$(prompt_yes_no "Use UEFI" y)"
-ENABLE_AGENT="$(prompt_yes_no "Enable agent" y)"
+DISK_SIZE="$(prompt_default "Disk size" "40G")"
+USE_UEFI="$(prompt_yes_no "Use UEFI" "y")"
+ENABLE_AGENT="$(prompt_yes_no "Enable guest agent" "y")"
+MAKE_TEMPLATE="$(prompt_yes_no "Make VM a template after creation" "n")"
 
+echo
+echo "=== SUMMARY ==="
+echo "VM ID:           $VM_ID"
+echo "VM Name:         $VM_NAME"
+echo "Image Storage:   $IMAGE_STORAGE"
+echo "Image Volume ID: $IMAGE_VOLID"
+echo "Bridge:          $BRIDGE"
+echo "IP Mode:         $IP_MODE"
+if [[ "$IP_MODE" == "static" ]]; then
+  echo "IP Address:      $IP_ADDRESS"
+  echo "Gateway:         $GATEWAY"
+fi
+echo "Target Storage:  $TARGET_STORAGE"
+echo "Cloud-Init User: $CI_USER"
+echo "Disk Size:       $DISK_SIZE"
+echo "Use UEFI:        $USE_UEFI"
+echo "Guest Agent:     $ENABLE_AGENT"
+echo "Make Template:   $MAKE_TEMPLATE"
+[ -n "${SSH_KEY_B64:-}" ] && echo "SSH Key:         provided" || echo "SSH Key:         none"
+[ -n "${CI_PASSWORD_B64:-}" ] && echo "Password:        provided" || echo "Password:        none"
+
+echo
+read -r -p "Continue? [y/N]: " CONFIRM
+case "${CONFIRM,,}" in
+  y|yes) ;;
+  *) echo "Aborted."; exit 0 ;;
+esac
+
+echo
+echo "Downloading runtime script..."
 curl -fsSL "${REPO_RAW_BASE}/scripts/bootstrap-cloud-vm.sh" -o "$TMP_SCRIPT"
 chmod +x "$TMP_SCRIPT"
 
+echo "Starting bootstrap..."
 VM_ID="$VM_ID" \
 VM_NAME="$VM_NAME" \
+NODE_NAME="$HOSTNAME_NOW" \
+IMAGE_STORAGE="$IMAGE_STORAGE" \
 IMAGE_VOLID="$IMAGE_VOLID" \
 TARGET_STORAGE="$TARGET_STORAGE" \
 BRIDGE="$BRIDGE" \
 CI_USER="$CI_USER" \
 SSH_KEY_B64="${SSH_KEY_B64:-}" \
 CI_PASSWORD_B64="${CI_PASSWORD_B64:-}" \
-IP_MODE="$IP_MODE" \
-IP_ADDRESS="${IP_ADDRESS:-}" \
-GATEWAY="${GATEWAY:-}" \
 DISK_SIZE="$DISK_SIZE" \
 USE_UEFI="$USE_UEFI" \
 ENABLE_AGENT="$ENABLE_AGENT" \
+IP_MODE="$IP_MODE" \
+IP_ADDRESS="$IP_ADDRESS" \
+GATEWAY="$GATEWAY" \
+MAKE_TEMPLATE="$MAKE_TEMPLATE" \
 "$TMP_SCRIPT"
