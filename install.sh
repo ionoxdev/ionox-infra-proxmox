@@ -1,4 +1,4 @@
-k#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_RAW_BASE="${REPO_RAW_BASE:-https://raw.githubusercontent.com/ionoxdev/ionox-infra-proxmox/main}"
