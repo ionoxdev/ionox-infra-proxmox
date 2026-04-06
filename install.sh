@@ -31,9 +31,19 @@ pick_from_list() {
     i=$((i + 1))
   done
 
+  if [ ${#options[@]} -eq 1 ]; then
+    read -r -p "Press ENTER to use the only option [${options[0]}]..." _ >&2 || true
+    printf '%s\n' "${options[0]}"
+    return 0
+  fi
+
   local choice
   while true; do
     read -r -p "Choose [1-${#options[@]}]: " choice >&2
+    if [[ -z "$choice" ]]; then
+      echo "Please choose a number" >&2
+      continue
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#options[@]} ]; then
       printf '%s\n' "${options[$((choice - 1))]}"
       return 0
@@ -52,14 +62,14 @@ prompt_default() {
 
 prompt_yes_no() {
   local label="$1"
-  local default_value="$2"
+  local default_value="$2"   # y of n
   local answer
   while true; do
     read -r -p "$label [$default_value]: " answer
     answer="${answer:-$default_value}"
-    case "$answer" in
-      y|Y|yes|YES) echo "true"; return 0 ;;
-      n|N|no|NO) echo "false"; return 0 ;;
+    case "${answer,,}" in
+      y|yes) echo "true"; return 0 ;;
+      n|no) echo "false"; return 0 ;;
       *) echo "Please answer y or n" ;;
     esac
   done
@@ -73,7 +83,7 @@ prompt_ssh_key() {
 
   local choice
   while true; do
-    read -r -p "Choose [1-2]: " choice
+    read -r -p "SSH key input method [1-2]: " choice
     case "$choice" in
       1)
         echo
@@ -160,7 +170,7 @@ VM_NAME="$(prompt_default "VM name" "ubuntu-cloud-vm")"
 
 echo
 echo "=== IMAGE ==="
-IMAGE_FILE="$(pick_from_list "Select cloud image from storage '$IMAGE_STORAGE'" "${CLOUD_IMAGES[@]}")"
+IMAGE_VOLID="$(pick_from_list "Select cloud image from storage '$IMAGE_STORAGE'" "${CLOUD_IMAGES[@]}")"
 
 echo
 echo "=== NETWORK ==="
@@ -197,7 +207,7 @@ echo "=== SUMMARY ==="
 echo "VM ID:           $VM_ID"
 echo "VM Name:         $VM_NAME"
 echo "Image Storage:   $IMAGE_STORAGE"
-echo "Image File:      $IMAGE_FILE"
+echo "Image Volume ID: $IMAGE_VOLID"
 echo "Bridge:          $BRIDGE"
 echo "IP Mode:         $IP_MODE"
 if [[ "$IP_MODE" == "static" ]]; then
@@ -214,8 +224,8 @@ echo "SSH Key:         provided"
 
 echo
 read -r -p "Continue? [y/N]: " CONFIRM
-case "$CONFIRM" in
-  y|Y|yes|YES) ;;
+case "${CONFIRM,,}" in
+  y|yes) ;;
   *) echo "Aborted."; exit 0 ;;
 esac
 
@@ -229,7 +239,7 @@ VM_ID="$VM_ID" \
 VM_NAME="$VM_NAME" \
 NODE_NAME="$HOSTNAME_NOW" \
 IMAGE_STORAGE="$IMAGE_STORAGE" \
-IMAGE_FILE="$IMAGE_FILE" \
+IMAGE_VOLID="$IMAGE_VOLID" \
 TARGET_STORAGE="$TARGET_STORAGE" \
 BRIDGE="$BRIDGE" \
 CI_USER="$CI_USER" \

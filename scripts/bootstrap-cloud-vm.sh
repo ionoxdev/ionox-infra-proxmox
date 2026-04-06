@@ -7,7 +7,7 @@ NODE_NAME="${NODE_NAME:-$(hostname)}"
 BRIDGE="${BRIDGE:-vmbr0}"
 
 IMAGE_STORAGE="${IMAGE_STORAGE:-cloudimages}"
-IMAGE_FILE="${IMAGE_FILE:-}"
+IMAGE_VOLID="${IMAGE_VOLID:-}"
 
 TARGET_STORAGE="${TARGET_STORAGE:-ceph-storage}"
 
@@ -38,20 +38,14 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
 
-resolve_image_storage_path() {
+resolve_storage_mount_path() {
   case "$1" in
-    cloudimages)
-      echo "/mnt/pve/cloudimages"
-      ;;
-    local)
-      echo "/var/lib/vz/template/iso"
-      ;;
-    truenas-iso)
-      echo "/mnt/pve/truenas-iso"
-      ;;
-    truenas-vm)
-      echo "/mnt/pve/truenas-vm"
-      ;;
+    cloudimages) echo "/mnt/pve/cloudimages" ;;
+    local) echo "/var/lib/vz" ;;
+    truenas-iso) echo "/mnt/pve/truenas-iso" ;;
+    truenas-vm) echo "/mnt/pve/truenas-vm" ;;
+    truenas-backups) echo "/mnt/pve/truenas-backups" ;;
+    truenas-lxc) echo "/mnt/pve/truenas-lxc" ;;
     *)
       pvesm path "$1" 2>/dev/null || true
       ;;
@@ -64,15 +58,20 @@ require_cmd awk
 require_cmd grep
 require_cmd mktemp
 
-[ -n "$IMAGE_FILE" ] || fail "IMAGE_FILE is required"
+[ -n "$IMAGE_VOLID" ] || fail "IMAGE_VOLID is required"
 
 pvesm status | grep -q "^${IMAGE_STORAGE}[[:space:]]" || fail "image storage '${IMAGE_STORAGE}' not found"
 pvesm status | grep -q "^${TARGET_STORAGE}[[:space:]]" || fail "target storage '${TARGET_STORAGE}' not found"
 
-IMAGE_STORAGE_PATH="$(resolve_image_storage_path "$IMAGE_STORAGE")"
+IMAGE_STORAGE_PATH="$(resolve_storage_mount_path "$IMAGE_STORAGE")"
 [ -n "$IMAGE_STORAGE_PATH" ] || fail "could not resolve filesystem path for image storage '${IMAGE_STORAGE}'"
 
-IMAGE_PATH="${IMAGE_STORAGE_PATH%/}/${IMAGE_FILE}"
+# Example:
+# IMAGE_VOLID = cloudimages:import/debian-12-genericcloud-amd64.qcow2
+# REL_PATH    = import/debian-12-genericcloud-amd64.qcow2
+REL_PATH="${IMAGE_VOLID#*:}"
+IMAGE_PATH="${IMAGE_STORAGE_PATH%/}/${REL_PATH}"
+
 [ -f "$IMAGE_PATH" ] || fail "image file not found: $IMAGE_PATH"
 
 log "Node"
@@ -81,11 +80,14 @@ echo "$NODE_NAME"
 log "Image storage path"
 echo "$IMAGE_STORAGE_PATH"
 
-log "Image file"
+log "Image volume ID"
+echo "$IMAGE_VOLID"
+
+log "Image file path"
 echo "$IMAGE_PATH"
 
 log "Create minimal VM config if needed"
-if qm status "$VM_ID" >/dev/null 2>&1; then
+if qm config "$VM_ID" >/dev/null 2>&1; then
   echo "VM $VM_ID already exists, skipping create"
 else
   qm create "$VM_ID" \
@@ -145,6 +147,7 @@ fi
 
 log "Configure Cloud-Init user"
 qm set "$VM_ID" --ciuser "$CI_USER"
+echo "Cloud-Init user set to: $CI_USER"
 
 if [ "$IP_MODE" = "dhcp" ]; then
   log "Configure DHCP"
