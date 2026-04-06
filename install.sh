@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+k#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_RAW_BASE="${REPO_RAW_BASE:-https://raw.githubusercontent.com/ionoxdev/ionox-infra-proxmox/main}"
@@ -52,8 +52,8 @@ prompt_yes_no() {
     read -r -p "$label [$default_value]: " answer
     answer="${answer:-$default_value}"
     case "$answer" in
-      y|Y|yes) echo "true"; return ;;
-      n|N|no) echo "false"; return ;;
+      y|Y|yes|YES) echo "true"; return 0 ;;
+      n|N|no|NO) echo "false"; return 0 ;;
       *) echo "Please answer y or n" ;;
     esac
   done
@@ -67,6 +67,46 @@ get_bridge_names() {
   ip -o link show | awk -F': ' '{print $2}' | grep '^vmbr' || true
 }
 
+prompt_ssh_key() {
+  echo
+  echo "=== SSH KEY ==="
+  echo "1) Paste public key"
+  echo "2) Use existing file path"
+
+  local choice
+  while true; do
+    read -r -p "Choose [1-2]: " choice
+    case "$choice" in
+      1)
+        echo
+        echo "Paste your public key, then press ENTER:"
+        local key
+        read -r key
+        if [[ ! "$key" =~ ^ssh- ]]; then
+          echo "ERROR: invalid SSH public key format" >&2
+          exit 1
+        fi
+        echo "$key"
+        return 0
+        ;;
+      2)
+        local path
+        read -r -p "SSH public key path [$HOME/.ssh/id_ed25519.pub]: " path
+        path="${path:-$HOME/.ssh/id_ed25519.pub}"
+        if [ ! -f "$path" ]; then
+          echo "ERROR: file not found: $path" >&2
+          exit 1
+        fi
+        cat "$path"
+        return 0
+        ;;
+      *)
+        echo "Invalid choice"
+        ;;
+    esac
+  done
+}
+
 require_cmd curl
 require_cmd qm
 require_cmd pvesm
@@ -76,28 +116,35 @@ HOSTNAME_NOW="$(hostname)"
 mapfile -t STORAGES < <(get_storage_names)
 mapfile -t BRIDGES < <(get_bridge_names)
 
+if [ ${#STORAGES[@]} -eq 0 ]; then
+  echo "ERROR: no storages found via pvesm status" >&2
+  exit 1
+fi
+
+if [ ${#BRIDGES[@]} -eq 0 ]; then
+  echo "ERROR: no vmbr bridges found" >&2
+  exit 1
+fi
+
 echo
 echo "IONOX Proxmox Cloud VM Installer"
 echo "Running on node: $HOSTNAME_NOW"
 
 echo
 echo "=== VM CONFIGURATION ==="
-
 VM_ID="$(prompt_default "VM ID" "9000")"
 VM_NAME="$(prompt_default "VM name" "ubuntu-cloud-vm")"
 
 echo
 echo "=== IMAGE ==="
-
 IMAGE_URL="$(prompt_default "Cloud image URL" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img")"
 IMAGE_FILE="$(prompt_default "Image filename" "noble-server-cloudimg-amd64.img")"
 
 echo
 echo "=== NETWORK ==="
-
 BRIDGE="$(pick_from_list "Select network bridge" "${BRIDGES[@]}")"
-
-IP_MODE="$(prompt_default "Network mode (dhcp/static)" "dhcp")"
+IP_MODE_RAW="$(prompt_default "Network mode (dhcp/static)" "dhcp")"
+IP_MODE="${IP_MODE_RAW,,}"
 
 IP_ADDRESS=""
 GATEWAY="10.10.0.1"
@@ -109,49 +156,53 @@ fi
 
 echo
 echo "=== STORAGE ==="
-
-STAGING_STORAGE="$(pick_from_list "Select staging storage (file-based)" "${STORAGES[@]}")"
+STAGING_STORAGE="$(pick_from_list "Select staging storage (temporary image download; file-based preferred)" "${STORAGES[@]}")"
 TARGET_STORAGE="$(pick_from_list "Select target VM storage" "${STORAGES[@]}")"
 
 echo
 echo "=== CLOUD INIT ==="
-
 CI_USER="$(prompt_default "Username" "ubuntu")"
-SSH_KEY_FILE="$(prompt_default "SSH public key path" "$HOME/.ssh/id_ed25519.pub")"
+SSH_KEY="$(prompt_ssh_key)"
 
 echo
 echo "=== OPTIONS ==="
-
 DISK_SIZE="$(prompt_default "Disk size" "40G")"
 USE_UEFI="$(prompt_yes_no "Use UEFI" "y")"
 ENABLE_AGENT="$(prompt_yes_no "Enable guest agent" "y")"
 
 echo
 echo "=== SUMMARY ==="
-
 echo "VM ID:           $VM_ID"
 echo "VM Name:         $VM_NAME"
-echo "Image:           $IMAGE_URL"
+echo "Image URL:       $IMAGE_URL"
+echo "Image File:      $IMAGE_FILE"
 echo "Bridge:          $BRIDGE"
 echo "IP Mode:         $IP_MODE"
+if [[ "$IP_MODE" == "static" ]]; then
+  echo "IP Address:      $IP_ADDRESS"
+  echo "Gateway:         $GATEWAY"
+fi
 echo "Staging Storage: $STAGING_STORAGE"
 echo "Target Storage:  $TARGET_STORAGE"
+echo "Cloud-Init User: $CI_USER"
+echo "Disk Size:       $DISK_SIZE"
+echo "Use UEFI:        $USE_UEFI"
+echo "Guest Agent:     $ENABLE_AGENT"
+echo "SSH Key:         provided"
 
 echo
 read -r -p "Continue? [y/N]: " CONFIRM
 case "$CONFIRM" in
-  y|Y|yes) ;;
+  y|Y|yes|YES) ;;
   *) echo "Aborted."; exit 0 ;;
 esac
 
 echo
 echo "Downloading runtime script..."
-
 curl -fsSL "${REPO_RAW_BASE}/scripts/bootstrap-cloud-vm.sh" -o "$TMP_SCRIPT"
 chmod +x "$TMP_SCRIPT"
 
 echo "Starting bootstrap..."
-
 VM_ID="$VM_ID" \
 VM_NAME="$VM_NAME" \
 NODE_NAME="$HOSTNAME_NOW" \
@@ -161,7 +212,7 @@ BRIDGE="$BRIDGE" \
 IMAGE_URL="$IMAGE_URL" \
 IMAGE_FILE="$IMAGE_FILE" \
 CI_USER="$CI_USER" \
-SSH_KEY_FILE="$SSH_KEY_FILE" \
+SSH_KEY="$SSH_KEY" \
 DISK_SIZE="$DISK_SIZE" \
 USE_UEFI="$USE_UEFI" \
 ENABLE_AGENT="$ENABLE_AGENT" \

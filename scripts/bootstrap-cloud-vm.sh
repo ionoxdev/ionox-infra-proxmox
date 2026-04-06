@@ -38,9 +38,29 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
 
-get_storage_path() {
-  local storage_name="$1"
-  pvesm path "$storage_name" 2>/dev/null || true
+resolve_staging_path() {
+  case "$1" in
+    local)
+      echo "/var/lib/vz/template/iso"
+      ;;
+    truenas-iso)
+      echo "/mnt/pve/truenas-iso"
+      ;;
+    truenas-vm)
+      echo "/mnt/pve/truenas-vm"
+      ;;
+    truenas-backups)
+      echo "/mnt/pve/truenas-backups"
+      ;;
+    truenas-lxc)
+      echo "/mnt/pve/truenas-lxc"
+      ;;
+    *)
+      local path
+      path="$(pvesm path "$1" 2>/dev/null || true)"
+      echo "$path"
+      ;;
+  esac
 }
 
 require_cmd qm
@@ -52,8 +72,9 @@ require_cmd grep
 pvesm status | grep -q "^${STAGING_STORAGE}[[:space:]]" || fail "staging storage '${STAGING_STORAGE}' not found"
 pvesm status | grep -q "^${TARGET_STORAGE}[[:space:]]" || fail "target storage '${TARGET_STORAGE}' not found"
 
-STAGING_PATH="$(get_storage_path "$STAGING_STORAGE")"
-[ -n "$STAGING_PATH" ] || fail "could not resolve a filesystem path for staging storage '${STAGING_STORAGE}'. Use a file-based storage like local or NFS."
+STAGING_PATH="$(resolve_staging_path "$STAGING_STORAGE")"
+[ -n "$STAGING_PATH" ] || fail "could not resolve a filesystem path for staging storage '${STAGING_STORAGE}'"
+mkdir -p "$STAGING_PATH"
 
 IMAGE_PATH="${STAGING_PATH%/}/${IMAGE_FILE}"
 
